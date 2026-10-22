@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for dependency in claude node; do
+  if ! command -v "$dependency" >/dev/null 2>&1; then
+    printf 'Required command not found: %s\n' "$dependency" >&2
+    exit 127
+  fi
+done
+
+key_file="${DEEPSEEK_KEY_FILE:-${HOME}/.config/deepseek/claude_code_api_key}"
+export CLAUDE_CONFIG_DIR="${DEEPSEEK_CONFIG_DIR:-${HOME}/.claude-deepseek}"
+
+if [[ -z "${DEEPSEEK_API_KEY:-}" && -r "$key_file" ]]; then
+  IFS= read -r DEEPSEEK_API_KEY < "$key_file" || true
+  DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY%$'\r'}"
+fi
+
+if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+  if [[ ! -t 0 ]]; then
+    printf 'DeepSeek API key not found. Run claude-deepseek in a terminal to enter it securely, or set DEEPSEEK_API_KEY.\n' >&2
+    exit 1
+  fi
+  read -r -s -p 'DeepSeek API key: ' DEEPSEEK_API_KEY
+  printf '\n' >&2
+  if [[ -z "$DEEPSEEK_API_KEY" ]]; then
+    printf 'DeepSeek API key cannot be empty.\n' >&2
+    exit 1
+  fi
+  umask 077
+  mkdir -p "${key_file%/*}"
+  chmod 700 "${key_file%/*}"
+  printf '%s\n' "$DEEPSEEK_API_KEY" > "$key_file"
+  chmod 600 "$key_file"
+fi
+
+export ANTHROPIC_BASE_URL='https://api.deepseek.com/anthropic'
+export ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY"
+export ANTHROPIC_MODEL="${DEEPSEEK_MODEL:-deepseek-flash[1m]}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$ANTHROPIC_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$ANTHROPIC_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${DEEPSEEK_FAST_MODEL:-deepseek-flash}"
+export ANTHROPIC_SMALL_FAST_MODEL="$ANTHROPIC_DEFAULT_HAIKU_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL="$ANTHROPIC_DEFAULT_HAIKU_MODEL"
+export CLAUDE_CODE_EFFORT_LEVEL="${DEEPSEEK_EFFORT_LEVEL:-max}"
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${DEEPSEEK_AUTO_COMPACT_WINDOW:-786432}"
+unset ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN
+unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
+
+# Keep credentials out of CLI arguments; explicit settings outrank project/user env.
+umask 077
+mkdir -p "$CLAUDE_CONFIG_DIR"
+chmod 700 "$CLAUDE_CONFIG_DIR"
+settings_file="$CLAUDE_CONFIG_DIR/deepseek-settings.json"
+node - "$settings_file" <<'NODE'
+const fs = require('node:fs');
+const env = {};
+for (const key of [
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+  'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_EFFORT_LEVEL',
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+]) env[key] = process.env[key];
+for (const key of [
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+]) env[key] = '';
+env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+const file = process.argv[2];
+const tmp = `${file}.${process.pid}.tmp`;
+try {
+  fs.writeFileSync(tmp, JSON.stringify({model: env.ANTHROPIC_MODEL, env}, null, 2) + '\n', {mode: 0o600, flag: 'wx'});
+  fs.renameSync(tmp, file);
+} finally {
+  fs.rmSync(tmp, {force: true});
+}
+NODE
+
+# Place the provider settings last so earlier --settings cannot replace them.
+exec claude "$@" --settings "$settings_file"
