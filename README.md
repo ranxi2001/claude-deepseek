@@ -11,8 +11,12 @@ back to an old gateway. No local proxy or Claude Code patch is needed.
 
 ## Install
 
-Requires Bash, Node.js 18+, and an installed `claude` command. Intended for Linux,
-macOS, and WSL. The real API smoke test was run on Linux with Claude Code 2.1.296.
+Requires Bash, Node.js 18+, and an installed `claude` command. Resource protection
+is enabled by default and requires Linux cgroup v2, systemd 254+, and a working
+systemd user manager (including WSL when configured accordingly). On macOS or
+other unsupported hosts, starting a session requires explicitly opting out with
+`DEEPSEEK_RESOURCE_LIMITS=0`; see resource protection below. The real API smoke test
+was run on Linux with Claude Code 2.1.296.
 
 ```bash
 git clone https://github.com/ranxi2001/claude-deepseek.git
@@ -48,6 +52,9 @@ DEEPSEEK_MODEL='deepseek-v4-pro[1m]' claude-deepseek
 | `DEEPSEEK_AUTO_COMPACT_WINDOW` | `786432` |
 | `DEEPSEEK_CONFIG_DIR` | `~/.claude-deepseek` |
 | `DEEPSEEK_KEY_FILE` | `~/.config/deepseek/claude_code_api_key` |
+| `DEEPSEEK_RESOURCE_LIMITS` | `1` (required; `0` explicitly disables limits) |
+| `DEEPSEEK_MEMORY_MAX` | `4G` (whole session, including descendants) |
+| `DEEPSEEK_TASKS_MAX` | `256` (processes and threads combined) |
 
 The endpoint is fixed to `https://api.deepseek.com/anthropic`. Normal Claude
 arguments pass through; the launcher's provider `--settings` is appended last.
@@ -59,6 +66,41 @@ The original Claude settings and login are left untouched. DeepSeek conversation
 and memory live in the separate configuration directory, so `--continue` resumes
 a DeepSeek session. Existing project permissions, hooks, MCP configuration and
 rules may still load; only the provider fields are pinned. This is not a sandbox.
+
+## Resource protection
+
+Each launch runs in a separate systemd user scope with a **4 GiB total memory cap**,
+**256-task cap** (processes and threads), and **no swap usage**. Ordinary descendant
+processes inherit the scope, including shell tools, native binaries, background
+Codex workers and their compilers. The limits apply to their combined usage, not
+just Claude's JavaScript heap. `OOMPolicy=kill` terminates the scope together if a
+process triggers an OOM kill, rather than leaving the remaining workers running.
+See [systemd scope OOM policy](https://www.freedesktop.org/software/systemd/man/255/systemd.scope.html#OOMPolicy=).
+
+If scope creation fails, the launcher exits without retrying Claude outside the
+scope. A working user manager can be checked with `systemctl --user status`.
+Limits may be adjusted explicitly, for example:
+
+```bash
+DEEPSEEK_MEMORY_MAX=6G DEEPSEEK_TASKS_MAX=384 claude-deepseek
+```
+
+Memory accepts positive integer byte counts or `K`, `M`, `G`, `T` suffixes. Task
+counts must be positive integers; `0` and `infinity` are rejected. Independent
+top-level sessions have independent limits, so their combined consumption can
+still exceed host capacity. Size the caps and number of concurrent sessions for
+your machine. Existing sessions must be restarted to pick up launcher changes.
+
+An inherited session marker rejects nested `claude-deepseek` launches, including
+from tool shells, even when limits are disabled. It prevents accidental launcher
+recursion; it does not prohibit starting a different agent command. Such ordinary
+child processes still share the scope's resource budget. These are operational
+limits, not a security boundary: privileged processes can move themselves into
+other cgroups or launch services outside the scope.
+
+On hosts without the required resource controls, an explicit
+`DEEPSEEK_RESOURCE_LIMITS=0 claude-deepseek` runs with a warning and **no memory or
+task protection**. The nested-launch guard remains active.
 
 ## Credentials and verification
 
@@ -81,11 +123,17 @@ directory separately only if you no longer need their credentials and sessions.
 ```bash
 bash -n bin/claude-deepseek install.sh
 node --test test/launcher.test.mjs
+# Optional Linux verification with a real systemd user manager:
+CLAUDE_DEEPSEEK_INTEGRATION=1 node --test test/launcher.test.mjs
 ```
 
 Tests use a mock Claude CLI and temporary home directories. They make no API calls.
 CI runs on Linux and macOS. The mock tests verify settings precedence, argument
 forwarding, key-file handling, permissions, model mapping, installation and exit codes.
+Resource tests cover nested-launch rejection, scope arguments, explicit opt-out
+and failure without fallback. Opt-in integration tests verify inherited cgroup
+settings, a bounded 96 MiB OOM kill, and rejection of processes at an 8-task cap;
+they use mock Claude commands and never contact an API.
 
 Inspired by the isolated configuration approach in
 [sindecker/claude-code-byob](https://github.com/sindecker/claude-code-byob) and

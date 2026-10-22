@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Inherited by tool shells as well as Claude. Refuse accidental launcher recursion
+# even when resource limits were explicitly disabled by the original caller.
+if [[ -n "${DEEPSEEK_SESSION_ACTIVE:-}" ]]; then
+  printf 'Refusing nested claude-deepseek launch from an active session.\n' >&2
+  exit 1
+fi
+
+resource_limits="${DEEPSEEK_RESOURCE_LIMITS:-1}"
+memory_max="${DEEPSEEK_MEMORY_MAX:-4G}"
+tasks_max="${DEEPSEEK_TASKS_MAX:-256}"
+case "$resource_limits" in
+  1)
+    if [[ ! "$memory_max" =~ ^[1-9][0-9]*[KMGT]?$ || ! "$tasks_max" =~ ^[1-9][0-9]*$ ]]; then
+      printf 'Invalid resource limits: use a positive memory size (e.g. 4G) and task count.\n' >&2
+      exit 1
+    fi
+    if [[ ! -f /sys/fs/cgroup/cgroup.controllers ]] || ! command -v systemd-run >/dev/null 2>&1; then
+      printf 'Resource limits require Linux cgroup v2 and systemd-run (systemd 254+). No session started.\n' >&2
+      printf 'DEEPSEEK_RESOURCE_LIMITS=0 explicitly opts out of resource protection.\n' >&2
+      exit 1
+    fi
+    ;;
+  0)
+    printf 'Warning: claude-deepseek resource limits explicitly disabled.\n' >&2
+    ;;
+  *)
+    printf 'DEEPSEEK_RESOURCE_LIMITS must be 1 or 0.\n' >&2
+    exit 1
+    ;;
+esac
+
 for dependency in claude node; do
   if ! command -v "$dependency" >/dev/null 2>&1; then
     printf 'Required command not found: %s\n' "$dependency" >&2
@@ -78,4 +109,15 @@ try {
 NODE
 
 # Place the provider settings last so earlier --settings cannot replace them.
+export DEEPSEEK_SESSION_ACTIVE=1
+if [[ "$resource_limits" == 1 ]]; then
+  # A cgroup bounds the whole descendant tree, including background workers and
+  # native binaries. A JS heap cap or per-process ulimit cannot do that.
+  # Never retry outside the scope if creation fails (e.g. no user manager).
+  exec systemd-run --user --scope --quiet --collect --expand-environment=no \
+    --unit="claude-deepseek-$$" \
+    --property="MemoryMax=$memory_max" --property=MemorySwapMax=0 \
+    --property="TasksMax=$tasks_max" --property=OOMPolicy=kill \
+    -- "$(command -v claude)" "$@" --settings "$settings_file"
+fi
 exec claude "$@" --settings "$settings_file"
