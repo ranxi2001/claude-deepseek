@@ -144,7 +144,7 @@ test('invalid endpoint is rejected before Claude starts or credentials are saved
 test('first interactive launch saves the URL and endpoint key for later launches', t => {
   const f = fixture(t);
   // A PTY exercises the real prompts and hidden key input on both CI platforms.
-  const driver = `import os,pty,select,subprocess,sys,time
+  const driver = `import os,pty,select,subprocess,sys,time,termios
 master,slave=pty.openpty()
 child=subprocess.Popen(['bash',sys.argv[1]],stdin=slave,stdout=subprocess.PIPE,stderr=slave,text=True)
 os.close(slave)
@@ -158,7 +158,14 @@ try:
   if not ready:continue
   seen+=os.read(master,4096)
   if pending[0][0] in seen:
-   _,answer=pending.pop(0);os.write(master,answer);seen=b''
+   prompt,answer=pending.pop(0)
+   if b'API key for' in prompt:
+    # Bash prints the prompt before read -s applies its terminal mode. Its
+    # mode change can flush input, so wait for ECHO to be off before typing.
+    while termios.tcgetattr(master)[3] & termios.ECHO:
+     if time.monotonic()>deadline:raise RuntimeError('hidden input mode timeout')
+     time.sleep(0.01)
+   os.write(master,answer);seen=b''
  out,_=child.communicate(timeout=15)
  if child.returncode:raise RuntimeError('launcher failed')
  sys.stdout.write(out)
