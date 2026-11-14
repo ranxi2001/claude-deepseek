@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync, existsSync, readdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -104,4 +104,84 @@ test('installer installs and preserves an existing launcher', t => {
   assert.equal(readFileSync(join(target, 'claude-deepseek'), 'utf8'), readFileSync(launcher, 'utf8'));
   assert.equal(statSync(join(target, 'claude-deepseek')).mode & 0o777, 0o755);
   assert.match(r.stdout, /backed up/);
+});
+
+test('custom endpoint overrides stale project settings with gateway defaults', t => {
+  const f = fixture(t);
+  const r = f.run([], {DEEPSEEK_BASE_URL: 'https://rpm.tosky.io/'});
+  assert.equal(r.status, 0, r.stderr);
+  const {effective} = JSON.parse(r.stdout);
+  assert.equal(effective.ANTHROPIC_BASE_URL, 'https://rpm.tosky.io');
+  assert.equal(effective.ANTHROPIC_MODEL, 'deepseek-flash');
+  assert.equal(effective.CLAUDE_CODE_EFFORT_LEVEL, 'high');
+  assert.equal(effective.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '131072');
+  assert.equal(existsSync(join(f.home, '.config/deepseek/claude_code_api_key.base_url')), false);
+});
+
+test('a custom endpoint cannot reuse an existing official key', t => {
+  const f = fixture(t);
+  const keyFile = join(f.home, 'old-key');
+  writeFileSync(keyFile, 'official-test-only-key', {mode: 0o600});
+  const r = f.run([], {DEEPSEEK_API_KEY: '', DEEPSEEK_BASE_URL: 'https://rpm.tosky.io', DEEPSEEK_KEY_FILE: keyFile});
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /API key not found for this endpoint/);
+  assert.equal(r.stdout, '');
+  assert.equal(readFileSync(keyFile, 'utf8'), 'official-test-only-key');
+});
+
+test('invalid endpoint is rejected before Claude starts or credentials are saved', t => {
+  const f = fixture(t);
+  for (const url of ['not-a-url', 'http://gateway.example', 'https://user:password@example.com', 'https://gateway.example/?key=secret', 'https://gateway.example/#fragment', 'https://gateway.example/\npath']) {
+    const r = f.run([], {DEEPSEEK_BASE_URL: url});
+    assert.equal(r.status, 1, url);
+    assert.match(r.stderr, /Invalid API Base URL/);
+    assert.equal(r.stdout, '');
+    assert.equal(existsSync(join(f.home, '.claude-deepseek/deepseek-settings.json')), false);
+  }
+  assert.equal(f.run([], {DEEPSEEK_BASE_URL: 'http://127.0.0.1:8080'}).status, 0);
+});
+
+test('first interactive launch saves the URL and endpoint key for later launches', t => {
+  const f = fixture(t);
+  // A PTY exercises the real prompts and hidden key input on both CI platforms.
+  const driver = `import os,pty,select,subprocess,sys,time
+master,slave=pty.openpty()
+child=subprocess.Popen(['bash',sys.argv[1]],stdin=slave,stdout=subprocess.PIPE,stderr=slave,text=True)
+os.close(slave)
+pending=[(b'API Base URL [',b'https://rpm.tosky.io/\\n'),(b'API key for this endpoint: ',b'gateway-test-only-key\\n')]
+seen=b''
+deadline=time.monotonic()+15
+try:
+ while pending:
+  if time.monotonic()>deadline:raise RuntimeError('prompt timeout')
+  ready,_,_=select.select([master],[],[],0.2)
+  if not ready:continue
+  seen+=os.read(master,4096)
+  if pending[0][0] in seen:
+   _,answer=pending.pop(0);os.write(master,answer);seen=b''
+ out,_=child.communicate(timeout=15)
+ if child.returncode:raise RuntimeError('launcher failed')
+ sys.stdout.write(out)
+finally:
+ if child.poll() is None:child.kill();child.wait()
+ os.close(master)
+`;
+  const first = spawnSync('python3', ['-c', driver, launcher], {env: {...f.env, DEEPSEEK_API_KEY: ''}, cwd: f.home, encoding: 'utf8', timeout: 35000});
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(JSON.parse(first.stdout).effective.ANTHROPIC_BASE_URL, 'https://rpm.tosky.io');
+  const dir = join(f.home, '.config/deepseek');
+  const addressFile = join(dir, 'claude_code_api_key.base_url');
+  assert.equal(readFileSync(addressFile, 'utf8'), 'https://rpm.tosky.io\n');
+  assert.equal(statSync(addressFile).mode & 0o777, 0o600);
+  const keys = readdirSync(dir).filter(name => /claude_code_api_key\.[a-f0-9]{64}$/.test(name));
+  assert.equal(keys.length, 1);
+  assert.equal(statSync(join(dir, keys[0])).mode & 0o777, 0o600);
+  const again = f.run([], {DEEPSEEK_API_KEY: ''});
+  assert.equal(again.status, 0, again.stderr);
+  const {effective} = JSON.parse(again.stdout);
+  assert.equal(effective.ANTHROPIC_BASE_URL, 'https://rpm.tosky.io');
+  assert.equal(effective.ANTHROPIC_AUTH_TOKEN, 'gateway-test-only-key');
+  const other = f.run([], {DEEPSEEK_API_KEY: '', DEEPSEEK_BASE_URL: 'https://another.invalid'});
+  assert.equal(other.status, 1);
+  assert.equal(other.stdout, '');
 });

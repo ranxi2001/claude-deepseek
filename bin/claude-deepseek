@@ -11,6 +11,43 @@ done
 key_file="${DEEPSEEK_KEY_FILE:-${HOME}/.config/deepseek/claude_code_api_key}"
 export CLAUDE_CONFIG_DIR="${DEEPSEEK_CONFIG_DIR:-${HOME}/.claude-deepseek}"
 
+official_url='https://api.deepseek.com/anthropic'
+base_url_file="${DEEPSEEK_BASE_URL_FILE:-${key_file}.base_url}"
+base_url="${DEEPSEEK_BASE_URL:-}"
+save_base_url=0
+if [[ -z "$base_url" && -r "$base_url_file" ]]; then
+  IFS= read -r base_url < "$base_url_file" || true
+  base_url="${base_url%$'\r'}"
+fi
+if [[ -z "$base_url" ]]; then
+  if [[ -t 0 ]]; then
+    read -r -p "API Base URL [$official_url]: " base_url
+    save_base_url=1
+  fi
+  base_url="${base_url:-$official_url}"
+fi
+# Normalize before deriving the credential path. A different endpoint must never
+# silently inherit a saved key from the official API or another gateway.
+base_url="$(node - "$base_url" <<'NODE'
+const value = process.argv[2].trim();
+try {
+  const url = new URL(value);
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (/\s/.test(value) || url.username || url.password || url.search || url.hash ||
+      !(url.protocol === 'https:' || (url.protocol === 'http:' && local))) throw new Error();
+  process.stdout.write(url.href.replace(/\/+$/, ''));
+} catch {
+  console.error('Invalid API Base URL: use HTTPS (or HTTP on loopback), without credentials, query or fragment.');
+  process.exit(1);
+}
+NODE
+)"
+if [[ "$base_url" != "$official_url" ]]; then
+  endpoint_id="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$base_url")"
+  key_file="${key_file}.${endpoint_id}"
+fi
+printf 'API Base URL: %s\n' "$base_url" >&2
+
 if [[ -z "${DEEPSEEK_API_KEY:-}" && -r "$key_file" ]]; then
   IFS= read -r DEEPSEEK_API_KEY < "$key_file" || true
   DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY%$'\r'}"
@@ -18,10 +55,10 @@ fi
 
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   if [[ ! -t 0 ]]; then
-    printf 'DeepSeek API key not found. Run claude-deepseek in a terminal to enter it securely, or set DEEPSEEK_API_KEY.\n' >&2
+    printf 'API key not found for this endpoint. Run claude-deepseek in a terminal to enter it securely, or set DEEPSEEK_API_KEY.\n' >&2
     exit 1
   fi
-  read -r -s -p 'DeepSeek API key: ' DEEPSEEK_API_KEY
+  read -r -s -p 'API key for this endpoint: ' DEEPSEEK_API_KEY
   printf '\n' >&2
   if [[ -z "$DEEPSEEK_API_KEY" ]]; then
     printf 'DeepSeek API key cannot be empty.\n' >&2
@@ -34,16 +71,33 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   chmod 600 "$key_file"
 fi
 
-export ANTHROPIC_BASE_URL='https://api.deepseek.com/anthropic'
+if [[ "$save_base_url" == 1 ]]; then
+  umask 077
+  mkdir -p "${base_url_file%/*}"
+  chmod 700 "${base_url_file%/*}"
+  base_url_tmp="$(mktemp "${base_url_file}.XXXXXX")"
+  printf '%s\n' "$base_url" > "$base_url_tmp"
+  mv -f "$base_url_tmp" "$base_url_file"
+fi
+
+default_model='deepseek-flash[1m]'
+default_effort=max
+default_compact_window=786432
+if [[ "$base_url" != "$official_url" ]]; then
+  default_model=deepseek-flash
+  default_effort=high
+  default_compact_window=131072
+fi
+export ANTHROPIC_BASE_URL="$base_url"
 export ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY"
-export ANTHROPIC_MODEL="${DEEPSEEK_MODEL:-deepseek-flash[1m]}"
+export ANTHROPIC_MODEL="${DEEPSEEK_MODEL:-$default_model}"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$ANTHROPIC_MODEL"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$ANTHROPIC_MODEL"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="${DEEPSEEK_FAST_MODEL:-deepseek-flash}"
 export ANTHROPIC_SMALL_FAST_MODEL="$ANTHROPIC_DEFAULT_HAIKU_MODEL"
 export CLAUDE_CODE_SUBAGENT_MODEL="$ANTHROPIC_DEFAULT_HAIKU_MODEL"
-export CLAUDE_CODE_EFFORT_LEVEL="${DEEPSEEK_EFFORT_LEVEL:-max}"
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${DEEPSEEK_AUTO_COMPACT_WINDOW:-786432}"
+export CLAUDE_CODE_EFFORT_LEVEL="${DEEPSEEK_EFFORT_LEVEL:-$default_effort}"
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${DEEPSEEK_AUTO_COMPACT_WINDOW:-$default_compact_window}"
 unset ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN
 unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
 
