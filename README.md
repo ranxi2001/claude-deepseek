@@ -1,6 +1,6 @@
 # claude-deepseek
 
-Run Claude Code against DeepSeek's official Anthropic-compatible API with one command.
+Run Claude Code against DeepSeek's official Anthropic-compatible API or a compatible gateway with one command.
 
 [中文说明](README.zh-CN.md) · [DeepSeek setup guide](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/)
 
@@ -25,10 +25,18 @@ The installer uses `~/.local/bin` and backs up an existing launcher. It prints a
 PATH reminder if needed; it does not modify shell startup files. Override the
 destination with `INSTALL_DIR=/your/bin bash install.sh`.
 
-On first interactive launch, enter a key issued by the DeepSeek platform. Input
-is hidden and is saved to `~/.config/deepseek/claude_code_api_key` with mode `600`.
-Alternatively, provide `DEEPSEEK_API_KEY` through your environment or secret manager.
-The launcher never reuses an existing Anthropic/gateway token as a DeepSeek key.
+On first interactive launch, enter the API Base URL, then the key issued by that endpoint. For RPM:
+
+```text
+API Base URL [https://api.deepseek.com/anthropic]: https://rpm.tosky.io
+API key for this endpoint: (enter your RPM key)
+```
+
+Press Enter at the URL prompt to use the official DeepSeek endpoint and its official key. Both inputs are remembered, and key input is hidden. Use an Anthropic-compatible base address without `/v1/messages`; no source edit is required.
+
+The URL is saved to `~/.config/deepseek/claude_code_api_key.base_url`. The official key keeps its existing filename; custom endpoints use independent key files with an address-hash suffix. Files have mode `600`. `DEEPSEEK_KEY_FILE` changes this base path, and `DEEPSEEK_BASE_URL_FILE` can override the address-file path. Saved keys are never reused for another endpoint.
+
+`DEEPSEEK_BASE_URL` and `DEEPSEEK_API_KEY` override saved configuration for a launch without persisting the environment values. Non-interactive launches without a saved or explicit URL keep the official endpoint for backward compatibility. Gateway automation must set the URL explicitly or use a previously configured address.
 
 ## Usage
 
@@ -37,19 +45,22 @@ claude-deepseek
 claude-deepseek -p 'Reply with hello' --max-turns 1
 claude-deepseek --continue
 DEEPSEEK_MODEL='deepseek-v4-pro[1m]' claude-deepseek
+DEEPSEEK_BASE_URL=https://rpm.tosky.io claude-deepseek
 ```
 
 | Variable | Default |
 | --- | --- |
 | `DEEPSEEK_API_KEY` | Read from key file or prompt |
-| `DEEPSEEK_MODEL` | `deepseek-flash[1m]` |
+| `DEEPSEEK_BASE_URL` | Saved URL or prompt; official endpoint if unattended and unset |
+| `DEEPSEEK_BASE_URL_FILE` | `<DEEPSEEK_KEY_FILE>.base_url` |
+| `DEEPSEEK_MODEL` | Official: `deepseek-flash[1m]`; gateway: `deepseek-flash` |
 | `DEEPSEEK_FAST_MODEL` | `deepseek-flash` (Haiku, small/fast, subagents) |
-| `DEEPSEEK_EFFORT_LEVEL` | `max` |
-| `DEEPSEEK_AUTO_COMPACT_WINDOW` | `786432` |
+| `DEEPSEEK_EFFORT_LEVEL` | Official: `max`; gateway: `high` |
+| `DEEPSEEK_AUTO_COMPACT_WINDOW` | Official: `786432`; gateway: `131072` |
 | `DEEPSEEK_CONFIG_DIR` | `~/.claude-deepseek` |
-| `DEEPSEEK_KEY_FILE` | `~/.config/deepseek/claude_code_api_key` |
+| `DEEPSEEK_KEY_FILE` | `~/.config/deepseek/claude_code_api_key` (custom endpoints append an address hash) |
 
-The endpoint is fixed to `https://api.deepseek.com/anthropic`. Normal Claude
+The official default endpoint is `https://api.deepseek.com/anthropic`. Normal Claude
 arguments pass through; the launcher's provider `--settings` is appended last.
 An earlier `--settings` cannot replace this provider configuration. Use the
 environment variables above to change provider defaults. Explicit `--model`
@@ -66,13 +77,13 @@ The generated `~/.claude-deepseek/deepseek-settings.json` also contains the acti
 key and has mode `600`; its directory has mode `700`. The file is generated locally,
 never shipped with the repository, and refreshed at each launch. Treat it as a
 secret. Concurrent launches with different keys should use distinct
-`DEEPSEEK_CONFIG_DIR` values. API requests are billed by DeepSeek.
+`DEEPSEEK_CONFIG_DIR` values. Different endpoints also need distinct configuration directories when launched concurrently. API requests are billed by the selected provider.
 
 Exit any old Claude session before relaunching. In the new session run `/status`
-and check that the base URL is `https://api.deepseek.com/anthropic`, then send a
+and check that the base URL matches the address you configured, then send a
 short message. A successful `--version` alone does not verify API routing.
 
-To rotate a saved key, replace the key file securely or provide `DEEPSEEK_API_KEY`.
+To choose a new default endpoint, remove the address file and launch interactively again. Existing endpoint keys remain isolated. To rotate a saved key, replace the matching endpoint key file securely or provide `DEEPSEEK_API_KEY`.
 To uninstall, remove the installed launcher; remove the key and configuration
 directory separately only if you no longer need their credentials and sessions.
 
@@ -85,7 +96,7 @@ node --test test/launcher.test.mjs
 
 Tests use a mock Claude CLI and temporary home directories. They make no API calls.
 CI runs on Linux and macOS. The mock tests verify settings precedence, argument
-forwarding, key-file handling, permissions, model mapping, installation and exit codes.
+forwarding, key-file handling, permissions, model mapping, installation and exit codes. A pseudo-terminal test exercises first-run URL/key prompts and reuse; other cases cover URL validation and cross-endpoint credential isolation. No live gateway inference test is implied.
 
 Inspired by the isolated configuration approach in
 [sindecker/claude-code-byob](https://github.com/sindecker/claude-code-byob) and
